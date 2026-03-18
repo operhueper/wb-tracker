@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: wb-tracker
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: WB_API_TOKEN
+        sync: false          # set manually in Render dashboard
+      - key: DATABASE_URL
+        sync: false          # set manually in Render dashboard
+      - key: PRODUCT_ARTICLES
+        value: 437295425,398522523,478224791
