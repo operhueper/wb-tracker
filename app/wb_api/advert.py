@@ -73,22 +73,27 @@ def get_yesterday() -> str:
     return (date.today() - timedelta(days=1)).isoformat()
 
 
-async def get_fullstats(client: WBClient, campaign_ids: list[int], dates: list[str]) -> list:
+async def get_fullstats(client: WBClient, campaign_ids: list[int], begin_date: str, end_date: str) -> list:
     """
     Get full statistics for a list of campaigns on specified dates.
-    New endpoint: GET /adv/v3/fullstats (changed from POST in 2026)
+    New endpoint: POST /adv/v2/fullstats
+    Accepts intervals.
     """
     if not campaign_ids:
         return []
-    # New API: GET with params
-    import asyncio
-    results = []
-    for cid in campaign_ids:
-        data = await client.get(
-            f"{ADV_V2_BASE}/adv/v3/fullstats",
-            params={"id": cid, "dates": ",".join(dates)},
-        )
-        if isinstance(data, dict):
-            results.append(data)
-        await asyncio.sleep(0.2)
-    return results
+    
+    payload = [
+        {"id": cid, "interval": {"begin": begin_date, "end": end_date}}
+        for cid in campaign_ids
+    ]
+    
+    # Send in chunks of 50 inside the function or assume caller chunks
+    data = await client.post(
+        f"{ADV_V2_BASE}/adv/v2/fullstats",
+        data=payload
+    )
+    if isinstance(data, list):
+        return data
+    elif isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return []

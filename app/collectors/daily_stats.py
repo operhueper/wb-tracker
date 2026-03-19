@@ -9,15 +9,16 @@ from app.wb_api import advert as adv
 logger = logging.getLogger(__name__)
 
 
-async def collect_daily_stats(client: WBClient):
+async def collect_daily_stats(client: WBClient, days_back: int = 1):
     """
-    Daily at 06:00 MSK:
-    - Fetch yesterday's statistics for all known campaigns
-    - Calculate CTR, CPO, DRR, CR
-    - Save to campaign_daily_stats
+    Fetch statistics for the past `days_back` days.
+    By default runs for yesterday (days_back=1). If 30, gets 30 days.
     """
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    logger.info(f"📊 Daily stats collection for {yesterday}")
+    today = date.today()
+    end_date = today.isoformat()
+    begin_date = (today - timedelta(days=days_back)).isoformat()
+    
+    logger.info(f"📊 Stats collection from {begin_date} to {end_date}")
 
     try:
         campaigns = await db.fetch("SELECT wb_campaign_id FROM campaigns")
@@ -28,11 +29,13 @@ async def collect_daily_stats(client: WBClient):
         campaign_ids = [r["wb_campaign_id"] for r in campaigns]
         logger.info(f"Fetching stats for {len(campaign_ids)} campaigns")
 
-        # WB fullstats accepts up to 100 campaigns per request
         chunk_size = 50
         for i in range(0, len(campaign_ids), chunk_size):
             chunk = campaign_ids[i : i + chunk_size]
-            stats_list = await adv.get_fullstats(client, chunk, [yesterday])
+            stats_list = await adv.get_fullstats(client, chunk, begin_date, end_date)
+
+            if not stats_list:
+                continue
 
             for stat in stats_list:
                 wb_id = stat.get("advertId")
@@ -40,6 +43,10 @@ async def collect_daily_stats(client: WBClient):
 
                 for day_data in days:
                     try:
+                        stat_date = day_data.get("date", "")[:10]  # Get YYYY-MM-DD
+                        if not stat_date:
+                            continue
+
                         apps = day_data.get("apps", [])
                         # Sum across all placement types
                         shows = sum(a.get("views", 0) for a in apps)
@@ -80,21 +87,16 @@ async def collect_daily_stats(client: WBClient):
                               cr = EXCLUDED.cr,
                               raw_data = EXCLUDED.raw_data
                             """,
-                            camp_uuid, wb_id, yesterday,
+                            camp_uuid, wb_id, stat_date,
                             shows, clicks, ctr, cpc, spend,
                             orders, orders_sum, cpo, drr, cr,
                             json.dumps(day_data),
                         )
 
-                        logger.info(
-                            f"  Campaign {wb_id}: shows={shows}, clicks={clicks}, "
-                            f"orders={orders}, CPO={cpo:.2f}, DRR={drr:.2f}%"
-                        )
-
                     except Exception as e:
-                        logger.error(f"Error saving stats for campaign {wb_id}: {e}")
+                        logger.error(f"Error saving stats for campaign {wb_id} on {stat_date}: {e}")
 
-        logger.info("✅ Daily stats collection done")
+        logger.info(f"✅ Daily stats collection done ({days_back} days)")
 
     except Exception as e:
         logger.error(f"Daily stats collection failed: {e}", exc_info=True)

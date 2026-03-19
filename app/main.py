@@ -198,9 +198,10 @@ async def trigger_prices():
 
 
 @app.post("/collect/stats", tags=["trigger"])
-async def trigger_stats():
-    asyncio.create_task(_run_daily_stats())
-    return {"status": "triggered", "job": "daily_stats"}
+async def trigger_stats(days_back: int = 30):
+    """Trigger collection of historical campaign stats (clicks, spend, orders)."""
+    asyncio.create_task(stats_collector.collect_daily_stats(wb_client, days_back))
+    return {"status": "triggered", "job": "daily_stats", "days_back": days_back}
 
 from pydantic import BaseModel
 
