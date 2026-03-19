@@ -201,3 +201,28 @@ async def trigger_prices():
 async def trigger_stats():
     asyncio.create_task(_run_daily_stats())
     return {"status": "triggered", "job": "daily_stats"}
+
+from pydantic import BaseModel
+
+class ProductUpdate(BaseModel):
+    cost_price: float
+    wb_commission: float
+    logistics_cost: float
+
+@app.put("/products/{wb_article}", tags=["products"])
+async def update_product_economics(wb_article: int, econ: ProductUpdate):
+    """Update unit economics for margin calculation."""
+    await db.execute(
+        """
+        UPDATE products
+        SET cost_price = $1, wb_commission = $2, logistics_cost = $3, updated_at = now()
+        WHERE wb_article = $4
+        """,
+        econ.cost_price, econ.wb_commission, econ.logistics_cost, wb_article
+    )
+    return {"status": "success", "article": wb_article}
+
+@app.get("/products", tags=["products"])
+async def get_products():
+    rows = await db.fetch("SELECT wb_article, cost_price, wb_commission, logistics_cost FROM products ORDER BY wb_article")
+    return [dict(r) for r in rows]
