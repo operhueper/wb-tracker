@@ -4,6 +4,7 @@ from typing import List
 
 from app import database as db
 from app.wb_api.prices import get_product_prices, parse_price
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ async def collect_prices(article_ids: List[int]):
     logger.info(f"💰 Price collection for articles: {article_ids}")
 
     try:
-        raw_products = await get_product_prices(article_ids)
+        raw_products = await get_product_prices(article_ids, settings.wb_api_token)
         if not raw_products:
             logger.warning("No product data returned from WB card API")
             return

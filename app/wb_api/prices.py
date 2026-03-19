@@ -1,57 +1,86 @@
 import httpx
+import asyncio
 import logging
 from typing import List
 
 logger = logging.getLogger(__name__)
 
-CARD_URL = "https://card.wb.ru/cards/v2/detail"
+# Official Seller API for prices (works on Russian servers like Render Frankfurt)
+PRICES_URL = "https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter"
+# Fallback: old seller API
+PRICES_URL_V1 = "https://seller-api.wildberries.ru/public/api/v1/info"
 
 
-async def get_product_prices(article_ids: List[int]) -> List[dict]:
+async def get_product_prices(article_ids: List[int], token: str) -> List[dict]:
     """
-    Fetch product prices from public WB API (no token needed).
-    Returns price_base, price_sale, SPP info for each article.
-    dest=-1257786 = Moscow (largest buyer base, most representative SPP).
+    Fetch product prices from the official WB Seller Prices API.
+    Requires seller token. Returns list of product price objects.
     """
-    params = {
-        "appType": "1",
-        "curr": "rub",
-        "dest": "-1257786",
-        "nm": ";".join(str(x) for x in article_ids),
-    }
+    headers = {"Authorization": token}
+    results = []
+
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get(CARD_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            products = data.get("data", {}).get("products", [])
-            logger.info(f"Fetched prices for {len(products)} products")
-            return products
+        async with httpx.AsyncClient(timeout=30) as client:
+            for nm_id in article_ids:
+                try:
+                    resp = await client.get(
+                        PRICES_URL,
+                        headers=headers,
+                        params={"limit": 1, "offset": 0, "filterNmID": nm_id},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        goods = data.get("data", {}).get("listGoods", [])
+                        if goods:
+                            results.append({"nmId": nm_id, "goods": goods[0]})
+                    elif resp.status_code == 404:
+                        logger.warning(f"Article {nm_id} not found in prices API")
+                    else:
+                        logger.warning(f"Price API returned {resp.status_code} for {nm_id}: {resp.text[:200]}")
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.error(f"Failed to fetch price for {nm_id}: {e}")
+
+        logger.info(f"Fetched prices for {len(results)} / {len(article_ids)} products")
+        return results
+
     except Exception as e:
         logger.error(f"Failed to fetch prices: {e}")
         return []
 
 
-def parse_price(product: dict) -> dict:
+def parse_price(raw: dict) -> dict:
     """
-    Extract pricing data from a product object.
-    All WB prices are stored in kopecks (1 rub = 100 kopecks).
+    Extract pricing data from v2 listGoods response.
+    
+    Structure: raw = {nmId: int, goods: {...}}
+    goods contains: price, discount, spp, priceWithDiscount, promoCode, etc.
     """
-    price_base = product.get("priceU", 0) / 100
-    price_sale = product.get("salePriceU", 0) / 100
-    discount_pct = product.get("sale", 0)        # продавческая скидка %
-    spp_pct = product.get("spp", 0)              # скидка WB (СПП) %
+    nm_id = raw.get("nmId")
+    goods = raw.get("goods", {})
 
-    # Real buyer price = sale price minus SPP
-    price_spp = round(price_sale * (1 - spp_pct / 100), 2) if spp_pct else price_sale
+    # Seller price (before discounts)
+    price_base = goods.get("price", 0)
 
-    # Also check clientPriceU which WB sometimes returns directly
-    client_price_u = product.get("clientPriceU")
-    if client_price_u:
-        price_spp = client_price_u / 100
+    # Seller discount %
+    discount_pct = goods.get("discount", 0)
+
+    # Price after seller discount
+    price_sale = round(price_base * (1 - discount_pct / 100), 2)
+
+    # SPP = WB discount for loyal customers (%)
+    spp_pct = goods.get("spp", 0)
+
+    # Final buyer price (after both seller discount + SPP)
+    # WB sometimes returns this directly
+    client_price = goods.get("priceWithDiscount")
+    if client_price:
+        price_spp = client_price
+    else:
+        price_spp = round(price_sale * (1 - spp_pct / 100), 2) if spp_pct else price_sale
 
     return {
-        "wb_article": product.get("id"),
+        "wb_article": nm_id,
         "price_base": price_base,
         "price_sale": price_sale,
         "price_spp": price_spp,
