@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 
@@ -8,31 +7,45 @@ from app.wb_api import advert as adv
 
 logger = logging.getLogger(__name__)
 
+# Only track active/paused/ready statuses — skip old archived/deleted
+TRACKED_STATUSES = {9, 11, 4}
+
 
 async def collect_campaign_snapshots(client: WBClient):
     """
     Every 15 minutes:
-    - Fetch all campaigns from WB ADV API
-    - For each: get current bid, status, budget
+    - Fetch all campaigns via new GET /api/advert/v2/adverts
+    - Filter to active/paused only
+    - Extract bid (in rubles), status, name
     - Compare with last snapshot → detect changes
     - Save snapshot to DB
     """
     logger.info("📸 Campaign snapshot collection started")
     try:
-        campaigns = await adv.get_all_campaigns(client)
-        if not campaigns:
+        all_campaigns = await adv.get_all_campaigns(client)
+        if not all_campaigns:
             logger.warning("No campaigns returned from API")
             return
 
-        logger.info(f"Processing {len(campaigns)} campaigns")
+        # Filter to statuses we care about
+        campaigns = [c for c in all_campaigns if c.get("status") in TRACKED_STATUSES]
+        logger.info(f"Processing {len(campaigns)} active/paused campaigns (out of {len(all_campaigns)} total)")
 
         for camp in campaigns:
             try:
-                wb_id = camp.get("advertId")
+                wb_id = camp.get("id")
                 if not wb_id:
                     continue
 
+                camp_name = adv.get_campaign_name(camp)
+                current_bid = adv.extract_bid_from_v2(camp)
+                current_status = camp.get("status")
+                # Budget not directly available in v2 — store as None for now
+                current_daily_budget = None
+
                 # Upsert campaign record
+                # Note: campaign_type in DB is INT, but new API returns strings ('manual','unified')
+                # We store the bid_type string in the name for reference, and NULL for campaign_type int
                 camp_uuid = await db.fetchval(
                     """
                     INSERT INTO campaigns (wb_campaign_id, name, campaign_type, status)
@@ -44,18 +57,10 @@ async def collect_campaign_snapshots(client: WBClient):
                     RETURNING id
                     """,
                     wb_id,
-                    camp.get("name", ""),
-                    camp.get("type"),
-                    camp.get("status"),
+                    camp_name,
+                    None,  # campaign_type is INT in DB; new API returns strings — store NULL
+                    current_status,
                 )
-
-                # Get current bid from campaign detail
-                detail = await adv.get_campaign_detail(client, wb_id)
-                await asyncio.sleep(0.2)
-
-                current_bid = adv.extract_bid_from_detail(detail) if detail else None
-                current_status = camp.get("status")
-                current_daily_budget = camp.get("dailyBudget")
 
                 # Compare with last snapshot
                 last = await db.fetchrow(
@@ -80,10 +85,6 @@ async def collect_campaign_snapshots(client: WBClient):
                     if last["status"] != current_status:
                         is_changed = True
                         change_details["status"] = {"from": last["status"], "to": current_status}
-                    prev_budget = float(last["budget_daily"]) if last["budget_daily"] is not None else None
-                    if prev_budget != current_daily_budget:
-                        is_changed = True
-                        change_details["budget_daily"] = {"from": prev_budget, "to": current_daily_budget}
                 else:
                     # First snapshot — mark as new
                     is_changed = True
@@ -107,10 +108,10 @@ async def collect_campaign_snapshots(client: WBClient):
                 )
 
                 if is_changed and change_details.get("event") != "first_snapshot":
-                    logger.info(f"🔔 Campaign {wb_id} CHANGED: {change_details}")
+                    logger.info(f"🔔 Campaign {wb_id} '{camp_name}' CHANGED: {change_details}")
 
             except Exception as e:
-                logger.error(f"Error processing campaign {camp.get('advertId')}: {e}")
+                logger.error(f"Error processing campaign {camp.get('id')}: {e}", exc_info=True)
                 continue
 
         logger.info("✅ Campaign snapshot collection done")

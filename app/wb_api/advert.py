@@ -1,117 +1,94 @@
-import asyncio
 import logging
 from datetime import date, timedelta
-from .client import WBClient, ADV_BASE
+from .client import WBClient
 
 logger = logging.getLogger(__name__)
 
-# All meaningful campaign statuses
-CAMPAIGN_STATUSES = [-1, 4, 7, 8, 9, 11]
+# New API base (2026-03-05+)
+ADV_V2_BASE = "https://advert-api.wildberries.ru"
+
+# Status codes meaning
+STATUS_MAP = {
+    -1: "deleted",
+    4: "ready_to_start",
+    7: "ended",
+    8: "refused",
+    9: "active",
+    11: "paused",
+}
+
+# We only care about active + paused campaigns
+TRACKED_STATUSES = {9, 11, 4}
 
 
 async def get_all_campaigns(client: WBClient) -> list:
     """
-    Fetch all campaigns across all statuses.
-    WB API 2025: this endpoint requires POST method.
+    Fetch all campaigns using the new WB API (2026-03-05+).
+    GET /api/advert/v2/adverts  → returns all campaigns with full details.
+    
+    Each campaign has:
+      - id: advertId
+      - status: 9=active, 11=paused, 7=ended, etc.
+      - settings.name: campaign name
+      - nm_settings[].bids_kopecks.search: current CPM bid in kopecks
+      - bid_type: 'manual' / 'auto'
     """
-    result = []
-    for status in CAMPAIGN_STATUSES:
-        # WB changed /adv/v1/promotion/adverts to POST in 2025
-        data = await client.post(
-            f"{ADV_BASE}/adv/v1/promotion/adverts",
-            data=None,   # empty body — params go in URL
-            params={"status": status, "limit": 100, "offset": 0},
+    data = await client.get(f"{ADV_V2_BASE}/api/advert/v2/adverts")
+    if not data or not isinstance(data, dict):
+        logger.warning("get_all_campaigns: empty or bad response")
+        return []
+
+    adverts = data.get("adverts", [])
+    logger.info(f"get_all_campaigns: retrieved {len(adverts)} campaigns from API")
+    return adverts
+
+
+def extract_bid_from_v2(campaign: dict) -> float | None:
+    """
+    Extract CPM bid (in rubles) from the new /api/advert/v2/adverts response.
+    Bid is stored in kopecks in nm_settings[].bids_kopecks.search
+    """
+    nm_settings = campaign.get("nm_settings", [])
+    if nm_settings:
+        # Use the highest bid among all nmIds in the campaign
+        bids = []
+        for nm in nm_settings:
+            bids_kopecks = nm.get("bids_kopecks", {})
+            search_bid = bids_kopecks.get("search", 0)
+            if search_bid:
+                bids.append(search_bid)
+        if bids:
+            return max(bids) / 100  # convert kopecks to rubles
+
+    # Fallback for auto campaigns
+    return None
+
+
+def get_campaign_name(campaign: dict) -> str:
+    """Extract campaign name from settings."""
+    return campaign.get("settings", {}).get("name", "")
+
+
+def get_yesterday() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
+async def get_fullstats(client: WBClient, campaign_ids: list[int], dates: list[str]) -> list:
+    """
+    Get full statistics for a list of campaigns on specified dates.
+    New endpoint: GET /adv/v3/fullstats (changed from POST in 2026)
+    """
+    if not campaign_ids:
+        return []
+    # New API: GET with params
+    import asyncio
+    results = []
+    for cid in campaign_ids:
+        data = await client.get(
+            f"{ADV_V2_BASE}/adv/v3/fullstats",
+            params={"id": cid, "dates": ",".join(dates)},
         )
-        if isinstance(data, list):
-            result.extend(data)
-        await asyncio.sleep(0.3)  # rate limit safety
-    return result
-
-
-async def get_campaign_detail(client: WBClient, campaign_id: int) -> dict | None:
-    """Get detailed campaign info including CPM bid."""
-    return await client.get(
-        f"{ADV_BASE}/adv/v0/advert",
-        params={"id": campaign_id},
-    )
-
-
-async def get_campaign_words(client: WBClient, campaign_id: int) -> dict | None:
-    """Get keyword statistics for a campaign."""
-    return await client.get(
-        f"{ADV_BASE}/adv/v1/stat/words",
-        params={"id": campaign_id},
-    )
-
-
-async def get_fullstats(client: WBClient, campaign_ids: list[int], dates: list[str]) -> list:
-    """Get full statistics for a list of campaigns on specified dates."""
-    if not campaign_ids:
-        return []
-    body = [{"id": cid, "dates": dates} for cid in campaign_ids]
-    result = await client.post(f"{ADV_BASE}/adv/v3/fullstats", data=body)
-    if isinstance(result, list):
-        return result
-    return []
-
-
-def extract_bid_from_detail(detail: dict) -> float | None:
-    """Extract CPM bid from campaign detail response."""
-    if not detail:
-        return None
-    params = detail.get("params", [])
-    if params and isinstance(params, list):
-        price = params[0].get("price")
-        if price is not None:
-            return float(price)
-    return detail.get("bet") or detail.get("cpm")
-
-
-def get_yesterday() -> str:
-    return (date.today() - timedelta(days=1)).isoformat()
-
-
-
-async def get_campaign_detail(client: WBClient, campaign_id: int) -> dict | None:
-    """Get detailed campaign info including CPM bid."""
-    return await client.get(
-        f"{ADV_BASE}/adv/v0/advert",
-        params={"id": campaign_id},
-    )
-
-
-async def get_campaign_words(client: WBClient, campaign_id: int) -> dict | None:
-    """Get keyword statistics for a campaign."""
-    return await client.get(
-        f"{ADV_BASE}/adv/v1/stat/words",
-        params={"id": campaign_id},
-    )
-
-
-async def get_fullstats(client: WBClient, campaign_ids: list[int], dates: list[str]) -> list:
-    """Get full statistics for a list of campaigns on specified dates."""
-    if not campaign_ids:
-        return []
-    body = [{"id": cid, "dates": dates} for cid in campaign_ids]
-    result = await client.post(f"{ADV_BASE}/adv/v3/fullstats", data=body)
-    if isinstance(result, list):
-        return result
-    return []
-
-
-def extract_bid_from_detail(detail: dict) -> float | None:
-    """Extract CPM bid from campaign detail response."""
-    if not detail:
-        return None
-    # Type 9 (unified/manual): bid in params[0].price
-    params = detail.get("params", [])
-    if params and isinstance(params, list):
-        price = params[0].get("price")
-        if price is not None:
-            return float(price)
-    # Fallback: bet field
-    return detail.get("bet") or detail.get("cpm")
-
-
-def get_yesterday() -> str:
-    return (date.today() - timedelta(days=1)).isoformat()
+        if isinstance(data, dict):
+            results.append(data)
+        await asyncio.sleep(0.2)
+    return results
