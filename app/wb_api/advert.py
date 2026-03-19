@@ -76,24 +76,30 @@ def get_yesterday() -> str:
 async def get_fullstats(client: WBClient, campaign_ids: list[int], begin_date: str, end_date: str) -> list:
     """
     Get full statistics for a list of campaigns on specified dates.
-    New endpoint: POST /adv/v2/fullstats
-    Accepts intervals.
+    New endpoint: GET /adv/v3/fullstats
+    Accepts: ids (comma separated), beginDate (YYYY-MM-DD), endDate (YYYY-MM-DD)
     """
     if not campaign_ids:
         return []
     
-    payload = [
-        {"id": cid, "interval": {"begin": begin_date, "end": end_date}}
-        for cid in campaign_ids
-    ]
+    import asyncio
     
-    # Send in chunks of 50 inside the function or assume caller chunks
-    data = await client.post(
-        f"{ADV_V2_BASE}/adv/v2/fullstats",
-        data=payload
-    )
-    if isinstance(data, list):
-        return data
-    elif isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return []
+    # WB allows multiple ids, but better to request in batches of 50
+    results = []
+    chunk_size = 50
+    for i in range(0, len(campaign_ids), chunk_size):
+        chunk = campaign_ids[i:i+chunk_size]
+        ids_str = ",".join(str(x) for x in chunk)
+        
+        data = await client.get(
+            f"{ADV_V2_BASE}/adv/v3/fullstats",
+            params={"ids": ids_str, "beginDate": begin_date[:10], "endDate": end_date[:10]}
+        )
+        if isinstance(data, list):
+            results.extend(data)
+        elif isinstance(data, dict) and "data" in data:
+            results.extend(data["data"])
+            
+        await asyncio.sleep(0.3)
+        
+    return results
